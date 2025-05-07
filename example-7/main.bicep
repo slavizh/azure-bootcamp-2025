@@ -1,57 +1,28 @@
-import * as types from 'types.bicep'
+targetScope = 'subscription'
 
-@description('The storage account configuration.')
-param storageAccount types.storageAccount
+import * as inputTypes from 'types.bicep'
 
-var networkSettings = {
-  allowedIps: []
+@description('Resource group configuration.')
+param resourceGroup inputTypes.resourceGroup
+
+resource resourceGroupResource 'Microsoft.Resources/resourceGroups@2024-11-01' = {
+  name: resourceGroup.name
+  location: resourceGroup.location
+  tags: resourceGroup.?tags ?? {}
 }
 
-resource storageAccountResource 'Microsoft.Storage/storageAccounts@2024-01-01' = {
-  name: storageAccount.name
-  location: resourceGroup().location
-  kind: storageAccount.?kind ?? 'StorageV2'
-  tags: storageAccount.?tags ?? {}
-  sku: {
-    name: storageAccount.?sku ?? 'Standard_GRS'
-  }
-  identity: {
-    type: storageAccount.?enableSystemAssignedIdentity ?? false
-      ? contains(storageAccount, 'userAssignedIdentities')
-        ? 'SystemAssigned,UserAssigned'
-        : 'SystemAssigned'
-      : contains(storageAccount, 'userAssignedIdentities')
-        ? 'UserAssigned'
-        : 'None'
-    userAssignedIdentities: contains(storageAccount, 'userAssignedIdentities')
-      ? toObject(
-          map(
-            storageAccount.userAssignedIdentities!,
-            userAssignedIdentity =>
-            resourceId(
-              userAssignedIdentity.?subscriptionId ?? subscription().subscriptionId,
-              userAssignedIdentity.resourceGroupName,
-              'Microsoft.ManagedIdentity/userAssignedIdentities',
-              userAssignedIdentity.name
-            )
-          ),
-          identity =>
-          identity, identity => {}
-        )
-      : null
-  }
-  properties: {
-    publicNetworkAccess: storageAccount.?networkSettings.?publicNetworkAccess ?? 'Enabled'
-    allowBlobPublicAccess: storageAccount.?networkSettings.?allowBlobPublicAccess ?? false
-    networkAcls: {
-      defaultAction: storageAccount.?networkSettings.?defaultNetworkAction ?? 'Allow'
-      bypass: storageAccount.?networkSettings.?bypassTraffic ?? 'None'
-      ipRules: contains(storageAccount, 'networkSettings')
-        ? map(union(networkSettings, storageAccount.networkSettings!).allowedIps, allowedIp => {
-          action: 'Allow'
-          value: allowedIp
-        })
-        : []
-    }
+resource keyVault 'Microsoft.KeyVault/vaults@2024-12-01-preview' existing = if (contains(resourceGroup, 'sqlLogicalServer') && resourceGroup.?sqlLogicalServer.authentication.type =~ 'SQLOnly' || resourceGroup.?sqlLogicalServer.authentication.type =~ 'EntraAndSQL') {
+  name: resourceGroup.?sqlLogicalServer.authentication.login.password.name
+  scope: az.resourceGroup(resourceGroup.?sqlLogicalServer.authentication.sqlLogin.?subscriptionId ?? subscription().subscriptionId, resourceGroup.?sqlLogicalServer.authentication.sqlLogin.password.resourceGroupName)
+}
+
+module sqlLogicalServer 'sql-logical-server.bicep' = if (contains(resourceGroup, 'sqlLogicalServer')) {
+  name: 'sqlLogicalServer-${uniqueString(deployment().location)}'
+  scope: resourceGroupResource
+  params: {
+    sqlLogicalServer: resourceGroup.sqlLogicalServer!
+    sqlPassword: resourceGroup.?sqlLogicalServer.authentication.type =~ 'SQLOnly' || resourceGroup.?sqlLogicalServer.authentication.type =~ 'EntraAndSQL'
+      ? keyVault.getSecret(resourceGroup.?sqlLogicalServer.authentication.sqlLogin.password.secretName)
+      : ''
   }
 }
